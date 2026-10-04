@@ -40,11 +40,20 @@ data class Goal(
 )
 
 @Serializable
+data class Operating(
+    val fuelPrice: Double = 60.0, val carConsumption: Double = 8.0, val motoConsumption: Double = 4.0,
+    val electricityPrice: Double = 7.0, val ebikeWh: Double = 18.0, val bikeCost: Double = 0.0
+)
+
+@Serializable
 data class AppData(
     val slots: List<Slot> = emptyList(),
     val expenses: List<Expense> = emptyList(),
     val goals: List<Goal> = emptyList(),
-    val shiftStart: Long = 0L
+    val shiftStart: Long = 0L,
+    val operating: Operating = Operating(),
+    val npdLimit: Double = 2_400_000.0,
+    val categories: List<String> = listOf("Топливо", "Зарядка", "Ремонт", "Обслуживание", "Прочее")
 )
 
 object Store {

@@ -6,7 +6,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -78,8 +80,8 @@ fun Tile(title: String, value: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun FormDialog(title: String, labels: List<String>, onDismiss: () -> Unit, onOk: (List<String>) -> Unit) {
-    val v = remember { mutableStateListOf(*Array(labels.size) { "" }) }
+fun FormDialog(title: String, labels: List<String>, onDismiss: () -> Unit, init: List<String> = emptyList(), onOk: (List<String>) -> Unit) {
+    val v = remember { mutableStateListOf(*Array(labels.size) { i -> init.getOrElse(i) { "" } }) }
     AlertDialog(
         onDismissRequest = onDismiss, title = { Text(title) },
         text = {
@@ -155,6 +157,10 @@ fun Dashboard() {
                 }
             }
         }
+        item { ForecastCard(d) }
+        item { NpdCard(d) }
+        item { WeekdayCard(d, period) }
+        item { HeatCard(d) }
         val top = topRestaurants(d, period)
         if (top.isNotEmpty()) {
             item { Text("Рестораны", fontSize = 18.sp, fontWeight = FontWeight.SemiBold) }
@@ -187,67 +193,92 @@ fun Dashboard() {
     }
 }
 
+fun Double.s(): String = if (this == 0.0) "" else toString().removeSuffix(".0")
+
 @Composable
 fun Slots() {
+    var editing by remember { mutableStateOf<Slot?>(null) }
     var adding by remember { mutableStateOf(false) }
-    val list = Store.data.slots.sortedByDescending { it.date + it.start }
+    var q by remember { mutableStateOf("") }
+    var sortBy by remember { mutableIntStateOf(0) }
+    val list = Store.data.slots
+        .filter { q.isBlank() || listOf(it.date, it.transport, it.type).any { x -> x.contains(q, true) } }
+        .let { l -> when (sortBy) { 0 -> l.sortedByDescending { it.date + it.start }; 1 -> l.sortedByDescending { it.income }; else -> l.sortedByDescending { it.net } } }
     Screen("Слоты", { IconButton({ adding = true }) { Icon(Icons.Default.Add, "Добавить") } }) {
+        item { OutlinedTextField(q, { q = it }, label = { Text("Поиск") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
+        item { Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("Дата", "Доход", "Чистыми").forEachIndexed { i, l -> FilterChip(sortBy == i, { sortBy = i }, { Text(l) }) } } }
         items(list, key = { it.id }) { s ->
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("${s.date}  ${s.start}–${s.end}", fontWeight = FontWeight.SemiBold)
-                        Text("${s.type} · ${s.transport} · ${s.orders} зак. · %.1f км".format(s.dist),
-                            fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("Чистыми ${s.net.rub()} · чаевые ${s.tips.rub()}", color = Accent)
-                    }
-                    IconButton({ Store.update { d -> d.copy(slots = d.slots.filter { it.id != s.id }) } }) {
-                        Icon(Icons.Default.Delete, "Удалить")
+            Card(Modifier.clickable { editing = s }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("${s.date}  ${s.start}–${s.end}", fontWeight = FontWeight.SemiBold)
+                    Text("${s.type} · ${s.transport} · ${s.orders} зак. · %.1f км · %.1f ч".format(s.dist, hoursOf(s)),
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val fuel = s.dist * costPerKm(Store.data.operating, s.transport)
+                    Text("Чистыми ${s.net.rub()} · чаевые ${s.tips.rub()}" + if (fuel > 0) " · топливо/энергия ${fuel.rub()}" else "", color = Accent)
+                    Row {
+                        TextButton({ Store.update { d -> d.copy(slots = d.slots + s.copy(id = System.currentTimeMillis())) } }) { Text("Копия") }
+                        TextButton({ Store.update { d -> d.copy(slots = d.slots.filter { it.id != s.id }) } }) { Text("Удалить") }
                     }
                 }
             }
         }
     }
-    if (adding) FormDialog("Новый слот", listOf("Дата (ГГГГ-ММ-ДД)", "Начало (ЧЧ:ММ)", "Конец (ЧЧ:ММ)",
-        "Транспорт", "Заказы", "Доход", "Чаевые", "Км", "Часы"), { adding = false }) { f ->
-        val h = f[8].num()
-        Store.update {
-            it.copy(slots = it.slots + Slot(
-                date = f[0].ifBlank { LocalDate.now().toString() }, start = f[1], end = f[2], transport = f[3],
-                orders = f[4].num().toInt(), income = f[5].num(), tips = f[6].num(), dist = f[7].num(),
-                hours = h, rph = if (h > 0) f[5].num() / h else 0.0
-            ))
+    if (adding || editing != null) {
+        val e = editing
+        FormDialog(if (e == null) "Новый слот" else "Слот", listOf("Дата (ГГГГ-ММ-ДД)", "Начало (ЧЧ:ММ)", "Конец (ЧЧ:ММ)", "Тип",
+            "Транспорт (авто/мото/электровело/вело)", "Заказы", "Доход", "Чаевые", "Налог", "Км", "Часы (пусто = авто)", "Бонус", "Бонус за заказы"),
+            { adding = false; editing = null },
+            listOf(e?.date ?: LocalDate.now().toString(), e?.start ?: "", e?.end ?: "", e?.type ?: "Плановый", e?.transport ?: "",
+                (e?.orders ?: 0).toString(), (e?.income ?: 0.0).s(), (e?.tips ?: 0.0).s(), (e?.tax ?: 0.0).s(), (e?.dist ?: 0.0).s(),
+                (e?.hours ?: 0.0).s(), (e?.bonus ?: 0.0).s(), (e?.orderBonus ?: 0.0).s())) { f ->
+            var n = (e ?: Slot()).copy(date = f[0], start = f[1], end = f[2], type = f[3], transport = f[4], orders = f[5].num().toInt(),
+                income = f[6].num(), tips = f[7].num(), tax = f[8].num(), dist = f[9].num(), hours = f[10].num(), bonus = f[11].num(), orderBonus = f[12].num())
+            val h = hoursOf(n); n = n.copy(hours = h, rph = if (h > 0) n.income / h else 0.0)
+            Store.update { d -> d.copy(slots = if (e == null) d.slots + n else d.slots.map { if (it.id == e.id) n else it }) }
+            adding = false; editing = null
         }
-        adding = false
     }
 }
 
 @Composable
 fun Expenses() {
     var adding by remember { mutableStateOf(false) }
-    val list = Store.data.expenses.sortedByDescending { it.date }
+    var newCat by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf<String?>(null) }
+    val d = Store.data
+    val list = d.expenses.filter { filter == null || it.category == filter }.sortedByDescending { it.date }
     Screen("Расходы", { IconButton({ adding = true }) { Icon(Icons.Default.Add, "Добавить") } }) {
+        item {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                item { FilterChip(filter == null, { filter = null }, { Text("Все") }) }
+                items(d.categories) { c -> FilterChip(filter == c, { filter = c }, { Text(c) }) }
+                item { AssistChip({ newCat = true }, { Text("+ категория") }) }
+            }
+        }
+        if (filter != null) item { TextButton({ val c = filter; Store.update { it.copy(categories = it.categories.filter { x -> x != c }) }; filter = null }) { Text("Удалить категорию «$filter»") } }
         item { Tile("Всего", list.sumOf { it.amount }.rub(), Modifier.fillMaxWidth()) }
+        if (filter == null) items(list.groupBy { it.category }.map { it.key to it.value.sumOf { e -> e.amount } }.sortedByDescending { it.second }) { (c, v) ->
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text(c.ifBlank { "Без категории" }); Text(v.rub(), color = Accent) }
+        }
         items(list, key = { it.id }) { e ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("${e.category} · ${e.amount.rub()}", fontWeight = FontWeight.SemiBold)
                     Text("${e.date} ${e.note}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                IconButton({ Store.update { d -> d.copy(expenses = d.expenses.filter { it.id != e.id }) } }) {
-                    Icon(Icons.Default.Delete, "Удалить")
-                }
+                IconButton({ Store.update { x -> x.copy(expenses = x.expenses.filter { it.id != e.id }) } }) { Icon(Icons.Default.Delete, "Удалить") }
             }
         }
     }
-    if (adding) FormDialog("Новый расход", listOf("Дата (ГГГГ-ММ-ДД)", "Категория", "Сумма", "Заметка"),
-        { adding = false }) { f ->
-        Store.update {
-            it.copy(expenses = it.expenses + Expense(
-                date = f[0].ifBlank { LocalDate.now().toString() }, category = f[1], amount = f[2].num(), note = f[3]
-            ))
-        }
+    if (adding) FormDialog("Новый расход", listOf("Дата (ГГГГ-ММ-ДД)", "Категория", "Сумма", "Заметка"), { adding = false },
+        listOf(LocalDate.now().toString(), filter ?: d.categories.lastOrNull().orEmpty())) { f ->
+        Store.update { it.copy(expenses = it.expenses + Expense(date = f[0].ifBlank { LocalDate.now().toString() }, category = f[1], amount = f[2].num(), note = f[3]),
+            categories = if (f[1].isBlank() || f[1] in it.categories) it.categories else it.categories + f[1]) }
         adding = false
+    }
+    if (newCat) FormDialog("Новая категория", listOf("Название"), { newCat = false }) { f ->
+        if (f[0].isNotBlank()) Store.update { it.copy(categories = (it.categories + f[0].trim()).distinct()) }
+        newCat = false
     }
 }
 
@@ -283,8 +314,11 @@ fun Goals() {
 @Composable
 fun More() {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    val d = Store.data
     var msg by remember { mutableStateOf("") }
     var replace by remember { mutableStateOf(false) }
+    var opDialog by remember { mutableStateOf(false) }
+    var npdDialog by remember { mutableStateOf(false) }
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
         msg = runCatching {
@@ -292,16 +326,34 @@ fun More() {
             Store.import(t, replace); "Импорт выполнен"
         }.getOrElse { "Ошибка импорта: ${it.message}" }
     }
-    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri: Uri? ->
+    @Composable fun writer(mime: String, text: () -> String) = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mime)) { uri: Uri? ->
         uri ?: return@rememberLauncherForActivityResult
         msg = runCatching {
-            ctx.contentResolver.openOutputStream(uri)!!.bufferedWriter().use { it.write(Store.export()) }; "Экспорт выполнен"
+            ctx.contentResolver.openOutputStream(uri)!!.bufferedWriter().use { it.write(text()) }; "Экспорт выполнен"
         }.getOrElse { "Ошибка экспорта: ${it.message}" }
     }
-    Screen("Данные") {
+    val exporter = writer("application/json") { Store.export() }
+    val csvExporter = writer("text/csv") { csv(Store.data) }
+    val o = d.operating
+    Screen("Настройки и данные") {
+        item { Section("Эксплуатационные расходы") {
+            Text("Топливо ${o.fuelPrice.s()} ₽/л · авто ${o.carConsumption.s()} л/100 · мото ${o.motoConsumption.s()} л/100", fontSize = 12.sp)
+            Text("Электричество ${o.electricityPrice.s()} ₽/кВт·ч · э-вело ${o.ebikeWh.s()} Вт·ч/км · вело ${o.bikeCost.s()} ₽/км", fontSize = 12.sp)
+            Button({ opDialog = true }) { Text("Изменить") }
+        } }
+        item { Section("Лимит НПД") { Text(d.npdLimit.rub()); Button({ npdDialog = true }) { Text("Изменить") } } }
         item { Button({ replace = false; importer.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth()) { Text("Импорт JSON (добавить)") } }
         item { OutlinedButton({ replace = true; importer.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth()) { Text("Импорт JSON (заменить всё)") } }
         item { OutlinedButton({ exporter.launch("courier_backup.json") }, Modifier.fillMaxWidth()) { Text("Экспорт JSON") } }
+        item { OutlinedButton({ csvExporter.launch("courier_slots.csv") }, Modifier.fillMaxWidth()) { Text("Экспорт слотов в CSV") } }
         if (msg.isNotEmpty()) item { Text(msg, color = Accent) }
+    }
+    if (opDialog) FormDialog("Эксплуатационные расходы", listOf("Топливо, ₽/л", "Авто, л/100 км", "Мото, л/100 км", "Электричество, ₽/кВт·ч", "Э-вело, Вт·ч/км", "Вело, ₽/км"),
+        { opDialog = false }, listOf(o.fuelPrice, o.carConsumption, o.motoConsumption, o.electricityPrice, o.ebikeWh, o.bikeCost).map { it.s() }) { f ->
+        Store.update { it.copy(operating = Operating(f[0].num(), f[1].num(), f[2].num(), f[3].num(), f[4].num(), f[5].num())) }
+        opDialog = false
+    }
+    if (npdDialog) FormDialog("Лимит НПД, ₽", listOf("Лимит"), { npdDialog = false }, listOf(d.npdLimit.s())) { f ->
+        Store.update { it.copy(npdLimit = f[0].num().takeIf { v -> v > 0 } ?: it.npdLimit) }; npdDialog = false
     }
 }
