@@ -1,0 +1,3 @@
+-keep class com.courier.analytics.** { *; }
+-keepattributes *Annotation*, InnerClasses
+-dontwarn kotlinx.serialization.**
